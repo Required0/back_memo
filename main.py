@@ -1,6 +1,6 @@
-from fastapi import FastAPI
-from typing import List, Dict,Optional
-from models import Task, Timezone
+from fastapi import FastAPI, HTTPException
+from typing import List, Dict, Optional
+from models import Task, Timezone, Base
 
 app = FastAPI()
 
@@ -41,11 +41,27 @@ async def get_task():
     return [Task(**task_data) for task_data in tasks_db]
 
 
+#проверка есть ли часового пояс у данного пользователя 
+@app.get("/check_timezone")
+async def check_timezone(user_id: int):
+ if user_id in time_zone:
+        print("У текущего пользователя уже установлен часовой пояс")
+        return {"timezone_str": time_zone[user_id]} 
+ else:
+    raise HTTPException(status_code=404, detail="У текущего пользователя еще не установлен часовой пояс")
 
+
+#установка часового пояса для конкретного польззователя 
 @app.post("/set_timezone", response_model=Timezone)
 async def set_timezone(timezone: Timezone):
-    time_zone[timezone.user_id] = timezone.timezone_str 
-
-    print("новый пояс установлен")
-    print(f"Пользователь: {timezone.user_id}\nЧасовой пояс: {timezone.timezone_str}")
-    return timezone
+    
+    if timezone.user_id in time_zone:
+        print("У текущего пользователя уже установлен часовой пояс")
+        time_zone[timezone.user_id] = timezone.timezone_str 
+        print("новый пояс установлен")
+        return timezone
+    else:
+        time_zone[timezone.user_id] = timezone.timezone_str 
+        print("новый пояс установлен")
+        print(f"Пользователь: {timezone.user_id}\nЧасовой пояс: {timezone.timezone_str}")
+        return timezone
