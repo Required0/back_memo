@@ -9,7 +9,7 @@ class Base(BaseModel):
 class Task(Base):  
     text: str 
     time: datetime   # Время в UTC
-    completed: bool = False
+    
 
 
 class Timezone(Base):
