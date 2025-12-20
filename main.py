@@ -6,11 +6,11 @@ import asyncio
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import uuid
+from conf import TOKEN
 
 
 app = FastAPI()
 
-TOKEN = "8340933216:AAG2A_Vx_wM_WEqySDH498IW1LNvb83YBd0"
 bot = Bot(token=TOKEN)
 
 
