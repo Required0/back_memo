@@ -35,6 +35,7 @@ async def send_reminder(chat_id, text, task_id):
 
 
 
+
 #принятие и установка напоминания на таймер 
 @app.post("/tasks", response_model=Task)
 async def create_task(task: Task):
@@ -58,9 +59,7 @@ async def create_task(task: Task):
     current_tz = time_zone.get(id_chat) 
 
     print(id, text, time, current_tz)
-    
-
- 
+     
     scheduler.add_job(
         send_reminder,      # Какую функцию запустить
         trigger='date',     # Тип: выполнить один раз в указанную дату
@@ -70,18 +69,28 @@ async def create_task(task: Task):
         id=f"job_{id}" # (Опционально) ID задачи, чтобы потом её можно было удалить
     )
 
-
-
     tasks_db.append(new_task_data) #записываем напоминание как словарь в бд
-    print(f"Бэкенд: Задача ID={task_id} сохранена: {new_task_data}")
+    print(f"Бэкенд: Задача ID={task_id} сохранена: {new_task_data}\n")
+    
+    print(tasks_db)
 
     return Task(**new_task_data)
 
 
+
 #получения всех задач из бд
 @app.get("/get_all_tasks", response_model=List[Task])
-async def get_task():
-    return [Task(**task_data) for task_data in tasks_db]
+async def get_task(user_id: int):
+    user_tasks = [t for t in tasks_db if t.get('user_id') == user_id]
+    print(user_tasks)
+    if user_tasks:
+        return user_tasks
+    else:
+        raise HTTPException(status_code=404, detail="У текущего пользователя нету напоминаний")
+
+  
+
+
 
 
 #проверка есть ли часового пояс у данного пользователя 
@@ -92,6 +101,8 @@ async def check_timezone(user_id: int):
         return {"timezone_str": time_zone[user_id]} 
  else:
     raise HTTPException(status_code=404, detail="У текущего пользователя еще не установлен часовой пояс")
+
+
 
 
 #установка часового пояса для конкретного пользователя 
