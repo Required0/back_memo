@@ -3,6 +3,7 @@ from typing import List, Dict, Optional
 from models import Task, Timezone, Base
 from aiogram import Bot
 import asyncio
+import random 
 from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import uuid
@@ -18,20 +19,20 @@ scheduler = AsyncIOScheduler()
 scheduler.start()
 
 # имитируем бд
-tasks_db: List[Dict] = []
+tasks_db: Dict[int, Dict] = {}
 
 time_zone = {}
 
 
 #функция для отправки напоминания по времени
-async def send_reminder(chat_id, text, task_id):
+async def send_reminder(chat_id, text, local_id):
     print(f" ОТПРАВКА: Пользователю {chat_id} сообщение: {text}")
-    await bot.send_message("Ваше напоминание: ", chat_id=chat_id, text=text)
+    await bot.send_message( chat_id=chat_id,  text=f"Ваше напоминание: {text}")
     
     global tasks_db
     
-    tasks_db = [t for t in tasks_db if t.get('task_id') != task_id]
-    print(f"Задача {task_id} удалена из временной базы так как была выполнена")
+    tasks_db[chat_id]["tasks"].pop(local_id, None)
+    print(f"Задача {local_id} удалена из временной базы так как была выполнена")
 
 
 
@@ -39,58 +40,90 @@ async def send_reminder(chat_id, text, task_id):
 #принятие и установка напоминания на таймер 
 @app.post("/tasks", response_model=Task)
 async def create_task(task: Task):
-
-    global next_task_id 
-
     print(f"\nБэкенд: Получен POST-запрос на /tasks.")
-    print(f"Бэкенд: Входящие данные (валидированы Pydantic): Text={task.text}, Time={task.time}")
-     
-    task_id = task_id = str(uuid.uuid4()) 
-    
+
+    # 1. Генерируем системный UUID
+    task_id = str(uuid.uuid4())
+
+    # 2. Превращаем модель в словарь и добавляем UUID
     new_task_data = task.model_dump()
-    new_task_data["id"] = task_id #номер задачи
-
-    print(new_task_data)
-
-    
+    new_task_data["id"] = task_id
+    # 3. Извлекаем данные для удобства
     id_chat = new_task_data["user_id"]
     text = new_task_data["text"]
-    time = new_task_data["time"]
-    current_tz = time_zone.get(id_chat) 
+    run_time = new_task_data["time"]
+    current_tz = time_zone.get(id_chat, "UTC") # Берем TZ или ставим UTC по дефолту
+   
+    if id_chat not in tasks_db:
+        # Если юзера нет, создаем ему структуру
+        tasks_db[id_chat] = {"counter": 0, "tasks": {}}
 
-    print(id, text, time, current_tz)
-     
+    current_user_tasks = tasks_db[id_chat]["tasks"] 
+   
+    while True:
+     local_id = random.randint(100, 999) 
+     if local_id not in current_user_tasks:
+       break
+      
+    new_task_data["local_id"] = local_id # Записываем номер в саму задачу
+
+    # 5. Добавляем задачу в планировщик
     scheduler.add_job(
-        send_reminder,      # Какую функцию запустить
-        trigger='date',     # Тип: выполнить один раз в указанную дату
-        run_date=time,  # КОГДА запустить (объект datetime)
-        timezone=current_tz,   # В каком часовом поясе считать это время
-        args=[id_chat, text, task_id], # Аргументы для функции
-        id=f"job_{id}" # (Опционально) ID задачи, чтобы потом её можно было удалить
+        send_reminder,
+        trigger='date',
+        run_date=run_time,
+        timezone=current_tz,
+        args=[id_chat, text, local_id],
+        id=f"job_{task_id}" # Используем UUID для уникальности в системе
     )
 
-    tasks_db.append(new_task_data) #записываем напоминание как словарь в бд
-    print(f"Бэкенд: Задача ID={task_id} сохранена: {new_task_data}\n")
-    
-    print(tasks_db)
+    # 6. Сохраняем задачу в наш "ящик" пользователя
+   
+    tasks_db[id_chat]["tasks"][local_id] = new_task_data
 
+
+    print(f"Бэкенд: Задача №{local_id} сохранена для {id_chat}. UUID: {task_id}")
+
+    # Возвращаем обновленные данные (включая local_id)
     return Task(**new_task_data)
+
 
 
 
 #получения всех задач из бд
 @app.get("/get_all_tasks", response_model=List[Task])
 async def get_task(user_id: int):
-    user_tasks = [t for t in tasks_db if t.get('user_id') == user_id]
-    print(user_tasks)
-    if user_tasks:
-        return user_tasks
-    else:
-        raise HTTPException(status_code=404, detail="У текущего пользователя нету напоминаний")
+    user_data = tasks_db.get(user_id)
+    
+    print(user_data)
 
-  
+    if user_data and user_data["tasks"]:
+        return list(user_data["tasks"].values())
 
 
+    raise HTTPException(status_code=404, detail="У текущего пользователя нет напоминаний")
+
+
+#удаление опредленной задачи 
+@app.delete("/delete_task")
+async def delete_task(task: Task):
+    new_task_data = task.model_dump()
+    
+    local_ID = new_task_data["local_id"] 
+    id_chat = new_task_data["user_id"] 
+    task_uuid = new_task_data.get("id")
+
+    removed = tasks_db[id_chat]["tasks"].pop(local_ID, None)
+    print(f"Задача {local_ID} удалена из временной базы так как была выполнена")
+    try:
+      scheduler.remove_job(f"job_{task_uuid}")
+    except:
+      pass
+
+    if removed:
+      print(f"Задача №{local_ID} удалена")
+      return {"status": "success", "message": "Задача удалена"}
+    return {"status": "error", "message": "Задача не найдена"}
 
 
 #проверка есть ли часового пояс у данного пользователя 

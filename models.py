@@ -7,6 +7,7 @@ class Base(BaseModel):
 
 
 class Task(Base):  
+    local_id: Optional[int] = None 
     text: str 
     time: datetime   # Время в UTC
     
