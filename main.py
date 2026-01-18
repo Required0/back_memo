@@ -8,9 +8,26 @@ from datetime import datetime
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import uuid
 from conf import TOKEN
+from fastapi import Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, delete
+from database import get_session, engine, Base # Наша функция подключения
+from table import TaskModel   # Наша таблица
+import uuid
+import random
+from contextlib import asynccontextmanager
 
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+  # Код ниже создает таблицы, если их еще нет
+  async with engine.begin() as conn:
+    await conn.run_sync(Base.metadata.create_all)
+  print("База данных готова (таблицы проверены/созданы)")
+  yield
+
+app = FastAPI(lifespan=lifespan)
 
 bot = Bot(token=TOKEN)
 
@@ -29,8 +46,6 @@ async def send_reminder(chat_id, text, local_id):
     print(f" ОТПРАВКА: Пользователю {chat_id} сообщение: {text}")
     await bot.send_message( chat_id=chat_id,  text=f"Ваше напоминание: {text}")
     
-    global tasks_db
-    
     tasks_db[chat_id]["tasks"].pop(local_id, None)
     print(f"Задача {local_id} удалена из временной базы так как была выполнена")
 
@@ -39,91 +54,129 @@ async def send_reminder(chat_id, text, local_id):
 
 #принятие и установка напоминания на таймер 
 @app.post("/tasks", response_model=Task)
-async def create_task(task: Task):
-    print(f"\nБэкенд: Получен POST-запрос на /tasks.")
+async def create_task(
+  task: Task, 
+  db: AsyncSession = Depends(get_session) # <--- Внедряем базу данных
+):
+  print(f"\nБэкенд: Получен POST-запрос на /tasks.")
 
-    # 1. Генерируем системный UUID
-    task_id = str(uuid.uuid4())
+  # 1. Генерируем системный UUID
+  generated_uuid = str(uuid.uuid4())
 
-    # 2. Превращаем модель в словарь и добавляем UUID
-    new_task_data = task.model_dump()
-    new_task_data["id"] = task_id
-    # 3. Извлекаем данные для удобства
-    id_chat = new_task_data["user_id"]
-    text = new_task_data["text"]
-    run_time = new_task_data["time"]
-    current_tz = time_zone.get(id_chat, "UTC") # Берем TZ или ставим UTC по дефолту
-   
-    if id_chat not in tasks_db:
-        # Если юзера нет, создаем ему структуру
-        tasks_db[id_chat] = {"counter": 0, "tasks": {}}
+  # 2. Определяем часовой пояс
+  # (Предполагаю, что словарь time_zone у тебя остался глобальным, как в старом коде)
+  current_tz = time_zone.get(task.user_id, "UTC")
 
-    current_user_tasks = tasks_db[id_chat]["tasks"] 
-   
-    while True:
-     local_id = random.randint(100, 999) 
-     if local_id not in current_user_tasks:
-       break
-      
-    new_task_data["local_id"] = local_id # Записываем номер в саму задачу
+  # 3. Генерируем уникальный local_id (100-999) через проверку в БД
+  local_id = 0
+  while True:
+    local_id = random.randint(100, 999)
 
-    # 5. Добавляем задачу в планировщик
-    scheduler.add_job(
-        send_reminder,
-        trigger='date',
-        run_date=run_time,
-        timezone=current_tz,
-        args=[id_chat, text, local_id],
-        id=f"job_{task_id}" # Используем UUID для уникальности в системе
+    # SQL: SELECT 1 FROM tasks WHERE user_id=... AND local_id=...
+    query = select(TaskModel).where(
+      TaskModel.user_id == task.user_id,
+      TaskModel.local_id == local_id
     )
+    result = await db.execute(query)
 
-    # 6. Сохраняем задачу в наш "ящик" пользователя
-   
-    tasks_db[id_chat]["tasks"][local_id] = new_task_data
+    # Если ничего не нашли (None) — значит номер свободен
+    if result.scalar_one_or_none() is None:
+      break
 
+  # 4. Создаем объект для базы данных
+  new_db_task = TaskModel(
+    task_uuid=generated_uuid,
+    user_id=task.user_id,
+    local_id=local_id,
+    task_text=task.task_text,
+    task_time=task.task_time,
+    time_zone=current_tz # Сохраняем и TZ тоже
+  )
 
-    print(f"Бэкенд: Задача №{local_id} сохранена для {id_chat}. UUID: {task_id}")
+  # 5. Сохраняем в MySQL
+  db.add(new_db_task)
+  await db.commit()       # Физически записываем на диск
+  await db.refresh(new_db_task) # Получаем обратно обновленные данные
 
-    # Возвращаем обновленные данные (включая local_id)
-    return Task(**new_task_data)
+  # 6. Добавляем задачу в планировщик (APScheduler)
+  # Логика остается прежней
+  scheduler.add_job(
+    send_reminder,
+    trigger='date',
+    run_date=task.task_time,
+    timezone=current_tz,
+    args=[task.user_id, task.task_text, local_id],
+    id=f"job_{generated_uuid}"
+  )
+
+  print(f"Бэкенд: Задача №{local_id} сохранена в MySQL для {task.user_id}. UUID: {generated_uuid}")
+
+  # 7. Возвращаем ответ в формате Pydantic (как и раньше)
+  # Мы берем данные из входящей задачи и добавляем сгенерированные ID
+  response_data = task.model_dump()
+  response_data["id"] = generated_uuid  # Твой строковый UUID
+  response_data["local_id"] = local_id  # Твой короткий номер
+
+  return Task(**response_data)
 
 
 
 
 #получения всех задач из бд
 @app.get("/get_all_tasks", response_model=List[Task])
-async def get_task(user_id: int):
-    user_data = tasks_db.get(user_id)
-    
-    print(user_data)
+async def get_tasks(user_id: int, db: AsyncSession = Depends(get_session)):
+  # 1. Формируем запрос: "Выбрать всё из таблицы TaskModel, где user_id совпадает"
+  query = select(TaskModel).where(TaskModel.user_id == user_id)
 
-    if user_data and user_data["tasks"]:
-        return list(user_data["tasks"].values())
+  # 2. Выполняем запрос
+  result = await db.execute(query)
 
+  # 3. Получаем список объектов
+  user_tasks = result.scalars().all()
 
-    raise HTTPException(status_code=404, detail="У текущего пользователя нет напоминаний")
+  # 4. Проверяем, нашли ли хоть что-то
+  if not user_tasks:
+    raise HTTPException(
+      status_code=404, 
+      detail=f"У пользователя {user_id} нет напоминаний"
+    )
+
+  return user_tasks
 
 
 #удаление опредленной задачи 
 @app.delete("/delete_task")
-async def delete_task(task: Task):
-    new_task_data = task.model_dump()
-    
-    local_ID = new_task_data["local_id"] 
-    id_chat = new_task_data["user_id"] 
-    task_uuid = new_task_data.get("id")
+async def delete_task(task: Task, db: AsyncSession = Depends(get_session)):
+  # 1. Извлекаем нужные ID из входящих данных
+  local_id = task.local_id
+  user_id = task.user_id
+  task_uuid = task.task_uuid # Это наш UUID для планировщика
 
-    removed = tasks_db[id_chat]["tasks"].pop(local_ID, None)
-    print(f"Задача {local_ID} удалена из временной базы так как была выполнена")
+  # 2. Формируем команду на удаление в БД
+  # "Удали запись из TaskModel, где совпадает user_id и local_id"
+  query = delete(TaskModel).where(
+    TaskModel.user_id == user_id, 
+    TaskModel.local_id == local_id
+  )
+
+  # 3. Выполняем удаление
+  result = await db.execute(query)
+  await db.commit() # ВАЖНО: подтверждаем изменения в базе
+
+  # 4. Проверяем, было ли что-то удалено (rowcount — количество затронутых строк)
+  if result.rowcount > 0:
+    print(f"Задача №{local_id} удалена из БД")
+
+    # 5. Пытаемся удалить задачу из планировщика (если она там была)
     try:
       scheduler.remove_job(f"job_{task_uuid}")
+      print(f"Уведомление job_{task_uuid} отменено")
     except:
-      pass
+      pass # Если задачи в планировщике нет (уже сработала), просто идем дальше
 
-    if removed:
-      print(f"Задача №{local_ID} удалена")
-      return {"status": "success", "message": "Задача удалена"}
-    return {"status": "error", "message": "Задача не найдена"}
+    return {"status": "success", "message": "Задача удалена"}
+
+  return {"status": "error", "message": "Задача не найдена в базе"}
 
 
 #проверка есть ли часового пояс у данного пользователя 
