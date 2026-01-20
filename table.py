@@ -37,3 +37,12 @@ class TaskModel(Base):
   created_at: Mapped[datetime.datetime] = mapped_column(
     DateTime, server_default=func.now()
   )
+
+
+
+class UserTimezone(Base):
+  __tablename__ = "timezones"
+
+  user_id: Mapped[int] = mapped_column(BigInteger, primary_key=True, index=True)
+
+  timezone: Mapped[str] = mapped_column(String(50), default="UTC")

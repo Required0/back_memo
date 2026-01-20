@@ -12,7 +12,7 @@ from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 from database import get_session, engine, Base # Наша функция подключения
-from table import TaskModel   # Наша таблица
+from table import TaskModel, UserTimezone   # Наша таблица
 import uuid
 import random
 from contextlib import asynccontextmanager
@@ -181,28 +181,49 @@ async def delete_task(task: Task, db: AsyncSession = Depends(get_session)):
 
 #проверка есть ли часового пояс у данного пользователя 
 @app.get("/check_timezone")
-async def check_timezone(user_id: int):
- if user_id in time_zone:
-        print("У текущего пользователя уже установлен часовой пояс")
-        return {"timezone_str": time_zone[user_id]} 
- else:
-    raise HTTPException(status_code=404, detail="У текущего пользователя еще не установлен часовой пояс")
+async def check_timezone(user_id: int, session: AsyncSession = Depends(get_session)):
+  # Ищем пользователя в БД по user_id
+  query = select(UserTimezone).where(UserTimezone.user_id == user_id)
+  result = await session.execute(query)
+  user = result.scalar_one_or_none()
+
+  if user and user.timezone:
+    print(f"У пользователя {user_id} найден пояс: {user.timezone}")
+    return {"timezone_str": user.timezone}
+
+  # Если пользователя нет или поле timezone пустое
+  raise HTTPException(
+    status_code=404, 
+    detail="У текущего пользователя еще не установлен часовой пояс"
+  )
 
 
 
 
 #установка часового пояса для конкретного пользователя 
 @app.post("/set_timezone", response_model=Timezone)
-async def set_timezone(timezone: Timezone):
-    
-    if timezone.user_id in time_zone:
-        print("У текущего пользователя уже установлен часовой пояс")
-        time_zone[timezone.user_id] = timezone.timezone_str 
-        print("новый пояс установлен")
-        print(timezone.timezone_str )
-        return timezone
-    else:
-        time_zone[timezone.user_id] = timezone.timezone_str 
-        print("новый пояс установлен")
-        print(f"Пользователь: {timezone.user_id}\nЧасовой пояс: {timezone.timezone_str}")
-        return timezone
+async def set_timezone(timezone: Timezone, session: AsyncSession = Depends(get_session)):
+  # 1. Ищем, есть ли уже такой пользователь в базе
+  query = select(UserTimezone).where(UserTimezone.user_id == timezone.user_id)
+  result = await session.execute(query)
+  user = result.scalar_one_or_none()
+
+  if user:
+    # 2. Если пользователь найден — обновляем его часовой пояс
+    print(f"У пользователя {user.user_id} уже был пояс, обновляем на: {timezone.timezone_str}")
+    user.timezone = timezone.timezone_str
+  else:
+    # 3. Если пользователя нет — создаем новую запись
+    print(f"Создаем новую запись для пользователя: {timezone.user_id}")
+    new_user = UserTimezone(
+      user_id=timezone.user_id,
+      timezone=timezone.timezone_str
+    )
+    session.add(new_user)
+
+  # 4. Сохраняем изменения в БД
+  await session.commit()
+
+  return timezone
+
+
